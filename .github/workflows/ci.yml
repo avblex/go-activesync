@@ -27,8 +27,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Track the latest 1.26 patch automatically so security fixes
           # land in CI without needing to bump go.mod every patch release.
@@ -68,8 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Track the latest 1.26 patch automatically so security fixes
           # land in CI without needing to bump go.mod every patch release.
@@ -118,7 +118,7 @@ jobs:
       # Codecov now requires a token even on public repos for reliable
       # ingestion. CODECOV_TOKEN is set as a repository secret. Failures
       # stay non-fatal so a codecov.io outage doesn't break the build.
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.out
@@ -172,8 +172,8 @@ jobs:
             url: http://localhost:8583/Microsoft-Server-ActiveSync
             device: integration00000000000000000003
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Track the latest 1.26 patch automatically so security fixes
           # land in CI without needing to bump go.mod every patch release.
