@@ -250,7 +250,25 @@ func TestCreateEvent_returnsServerID(t *testing.T) {
 }
 
 func TestUpdateEvent_andDeleteEvent(t *testing.T) {
-	c, _, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
+	c, _, _ := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// UpdateEvent is read-modify-write: answer the ItemOperations
+		// Fetch with the event's current state, Syncs with a plain
+		// ok response.
+		if r.URL.Query().Get("Cmd") == "ItemOperations" {
+			resp := &wbxml.Document{Root: wbxml.E(wbxml.PageItemOperations, "ItemOperations",
+				wbxml.E(wbxml.PageItemOperations, "Status", wbxml.Text("1")),
+				wbxml.E(wbxml.PageItemOperations, "Response",
+					wbxml.E(wbxml.PageItemOperations, "Fetch",
+						wbxml.E(wbxml.PageItemOperations, "Status", wbxml.Text("1")),
+						wbxml.E(wbxml.PageItemOperations, "Properties",
+							wbxml.E(wbxml.PageCalendar, "Subject", wbxml.Text("Old name")),
+						),
+					),
+				),
+			)}
+			writeWBXML(t, w, resp)
+			return
+		}
 		w.Header().Set("Content-Type", "application/vnd.ms-sync.wbxml")
 		w.Write(calendarSyncResponse("CK"))
 	})
@@ -515,8 +533,9 @@ func TestBuildEventApp_richDraft(t *testing.T) {
 			t.Errorf("%s = %v, want %q", name, el, want)
 		}
 	}
-	if app.Find("AllDayEvent") != nil {
-		t.Error("AllDayEvent=false should be omitted")
+	// AllDayEvent is required on Add; timed events carry an explicit "0".
+	if ad := app.Find("AllDayEvent"); ad == nil || ad.TextContent() != "0" {
+		t.Errorf("AllDayEvent = %v, want \"0\"", ad)
 	}
 	atts := app.Find("Attendees")
 	if atts == nil || len(atts.Children) != 2 {
@@ -882,9 +901,10 @@ func TestCreateEvent_postErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestCreateEvent_responseFallbackToClientID(t *testing.T) {
+func TestCreateEvent_responseMissingAddIsError(t *testing.T) {
 	// Server replies with a stray non-Add Response — CreateEvent must
-	// fall back to returning the client-generated id.
+	// report an error rather than fall back to the client-generated id,
+	// which would make a rejected create look like a success.
 	c, _, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		doc := &wbxml.Document{Root: wbxml.E(wbxml.PageAirSync, "Sync",
 			wbxml.E(wbxml.PageAirSync, "Collections",
@@ -905,15 +925,12 @@ func TestCreateEvent_responseFallbackToClientID(t *testing.T) {
 		w.Write(body)
 	})
 	_ = c.cfg.State.SetSyncKey(context.Background(), "cal", "K1")
-	id, err := c.CreateEvent(context.Background(), "cal", EventDraft{
+	_, err := c.CreateEvent(context.Background(), "cal", EventDraft{
 		StartTime: time.Date(2026, 5, 10, 9, 0, 0, 0, time.UTC),
 		EndTime:   time.Date(2026, 5, 10, 10, 0, 0, 0, time.UTC),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id == "" {
-		t.Error("expected client-generated id fallback")
+	if err == nil || !strings.Contains(err.Error(), "missing Responses/Add") {
+		t.Errorf("want missing-Responses/Add error, got %v", err)
 	}
 }
 
@@ -979,14 +996,22 @@ func TestSendSyncCommands_syncKeyReadError(t *testing.T) {
 
 func TestSendSyncCommands_emptyResponseIsNil(t *testing.T) {
 	// Empty 200 OK from the server. sendSyncCommands returns (nil, nil)
-	// — UpdateEvent surfaces no error since (_, err) is nil.
+	// — no error, no key persisted.
 	c, _, _ := newTestClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(200) // empty body
 	})
 	_ = c.cfg.State.SetSyncKey(context.Background(), "cal", "K1")
-	if err := c.UpdateEvent(context.Background(), "cal", "id", EventDraft{}); err != nil {
+	if _, err := c.sendSyncCommands(context.Background(), "cal", deleteCmd("x")); err != nil {
 		t.Errorf("empty response should not error, got %v", err)
 	}
+}
+
+func deleteCmd(serverID string) *wbxml.Element {
+	return wbxml.E(wbxml.PageAirSync, "Commands",
+		wbxml.E(wbxml.PageAirSync, "Delete",
+			wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text(serverID)),
+		),
+	)
 }
 
 func TestSendSyncCommands_collectionStatusError(t *testing.T) {
@@ -1005,7 +1030,7 @@ func TestSendSyncCommands_collectionStatusError(t *testing.T) {
 		w.Write(body)
 	})
 	_ = c.cfg.State.SetSyncKey(context.Background(), "cal", "K1")
-	if err := c.UpdateEvent(context.Background(), "cal", "id", EventDraft{}); !IsStatusCode(err, 8) {
+	if _, err := c.sendSyncCommands(context.Background(), "cal", deleteCmd("x")); !IsStatusCode(err, 8) {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -1019,7 +1044,7 @@ func TestSendSyncCommands_persistKeyError(t *testing.T) {
 	c.cfg.State = es
 	_ = es.inner.SetSyncKey(context.Background(), "cal", "K1")
 	es.setSyncKeyErr = errSentinel("ro")
-	if err := c.UpdateEvent(context.Background(), "cal", "id", EventDraft{}); err == nil ||
+	if _, err := c.sendSyncCommands(context.Background(), "cal", deleteCmd("x")); err == nil ||
 		!strings.Contains(err.Error(), "persist") {
 		t.Errorf("err = %v", err)
 	}
@@ -1028,7 +1053,8 @@ func TestSendSyncCommands_persistKeyError(t *testing.T) {
 func TestFormatEASTime(t *testing.T) {
 	t1 := time.Date(2024, 1, 15, 12, 34, 56, 0, time.UTC)
 	got := formatEASTime(t1)
-	want := "2024-01-15T12:34:56.000Z"
+	// Compact iCal form (MS-ASAIRS); Exchange rejects the dashed form.
+	want := "20240115T123456Z"
 	if got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
