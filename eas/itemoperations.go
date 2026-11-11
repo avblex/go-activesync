@@ -93,3 +93,85 @@ func (c *httpClient) FetchEmail(ctx context.Context, folderID, serverID string, 
 	}
 	return nil, errors.New("eas: ItemOperations: no Fetch response")
 }
+
+// FetchEvent issues an ItemOperations Fetch for one calendar event by
+// (folderID, serverID) and returns its full current state as an EventItem.
+//
+// Sync also returns event content, but only what fits the sync window and
+// only for items the server chose to include. FetchEvent is the reliable
+// way to read a single known item's authoritative state — in particular
+// the iCal UID, attendee list, meeting status, and time zone blob — which
+// UpdateEvent needs to preserve across a Change (Exchange replaces the
+// whole item, so any field not re-sent is dropped).
+func (c *httpClient) FetchEvent(ctx context.Context, folderID, serverID string) (*EventItem, error) {
+	if folderID == "" || serverID == "" {
+		return nil, errors.New("eas: FetchEvent: folderID and serverID are required")
+	}
+	doc := &wbxml.Document{
+		Root: wbxml.E(wbxml.PageItemOperations, "ItemOperations",
+			wbxml.E(wbxml.PageItemOperations, "Fetch",
+				wbxml.E(wbxml.PageItemOperations, "Store", wbxml.Text("Mailbox")),
+				wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text(folderID)),
+				wbxml.E(wbxml.PageAirSync, "ServerId", wbxml.Text(serverID)),
+			),
+		),
+	}
+	resp, err := c.post(ctx, "ItemOperations", doc)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.Root == nil {
+		return nil, errors.New("eas: ItemOperations: empty response")
+	}
+	if st := topStatus(resp.Root); st != 0 && st != StatusOK {
+		return nil, &StatusError{Command: "ItemOperations", Code: st}
+	}
+	resps := resp.Root.FindAll("Response")
+	for _, r := range resps {
+		fetch := r.Find("Fetch")
+		if fetch == nil {
+			continue
+		}
+		if fst := fetch.Find("Status"); fst != nil {
+			if code := atoi(fst.TextContent()); code != 0 && code != StatusOK {
+				return nil, &StatusError{Command: "ItemOperations/Fetch", Code: code}
+			}
+		}
+		props := fetch.Find("Properties")
+		if props == nil {
+			return nil, fmt.Errorf("eas: ItemOperations: Fetch missing <Properties>")
+		}
+		item := parseEventFromProperties(serverID, props)
+		if id := fetch.Find("ServerId"); id != nil {
+			item.ServerID = id.TextContent()
+		}
+		return &item, nil
+	}
+	return nil, errors.New("eas: ItemOperations: no Fetch response")
+}
+
+// parseEventFromProperties converts a Fetch <Properties> element into an
+// EventItem. Unlike parseEventFromCommand (which reads a Sync Add/Change
+// carrying an <ApplicationData> wrapper), a Fetch response places the
+// calendar-page and AirSyncBase fields directly under <Properties>.
+func parseEventFromProperties(serverID string, props *wbxml.Element) EventItem {
+	out := EventItem{ServerID: serverID}
+	if props == nil {
+		return out
+	}
+	for _, c := range props.Children {
+		el, ok := c.(*wbxml.Element)
+		if !ok {
+			continue
+		}
+		switch el.Codepage {
+		case wbxml.PageCalendar:
+			parseCalendarField(&out, el)
+		case wbxml.PageAirSyncBase:
+			if el.Name == "Body" {
+				parseEventBody(&out, el)
+			}
+		}
+	}
+	return out
+}

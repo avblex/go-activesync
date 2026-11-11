@@ -92,11 +92,16 @@ func (c *httpClient) SyncEmail(ctx context.Context, folderID string, opts EmailS
 		opts.DateFilter = FilterTwoWeek
 	}
 
+	requestKey, err := c.cfg.State.SyncKey(ctx, folderID)
+	if err != nil {
+		return nil, fmt.Errorf("eas: SyncEmail: read key: %w", err)
+	}
 	res, err := c.syncEmailOnce(ctx, folderID, opts)
 	if err != nil && IsStatusCode(err, StatusInvalidSyncKey) {
 		if rerr := c.cfg.State.SetSyncKey(ctx, folderID, "0"); rerr != nil {
 			return nil, fmt.Errorf("eas: SyncEmail: reset key: %w", rerr)
 		}
+		requestKey = "0"
 		res, err = c.syncEmailOnce(ctx, folderID, opts)
 	}
 	if err != nil {
@@ -107,18 +112,8 @@ func (c *httpClient) SyncEmail(ctx context.Context, folderID string, opts EmailS
 	// carried no items (typical EAS behavior on initial sync), make a
 	// second call to actually fetch data. The new SyncKey from the first
 	// call is what's now in storage.
-	if !opts.NoBootstrap && len(res.Added) == 0 && len(res.Changed) == 0 && len(res.Deleted) == 0 {
-		// Detect "this was the bootstrap" by the fact that storage now
-		// contains a non-zero key. Re-call once.
-		stored, _ := c.cfg.State.SyncKey(ctx, folderID)
-		if stored != "0" && stored != "" {
-			res2, err := c.syncEmailOnce(ctx, folderID, opts)
-			if err == nil {
-				return res2, nil
-			}
-			// fall through to return the bootstrap result on error so
-			// the caller at least sees the new key
-		}
+	if !opts.NoBootstrap && requestKey == "0" {
+		return c.syncEmailOnce(ctx, folderID, opts)
 	}
 	return res, nil
 }
@@ -142,6 +137,15 @@ func (c *httpClient) syncEmailOnce(ctx context.Context, folderID string, opts Em
 }
 
 func buildSyncRequest(folderID, key string, opts EmailSyncOptions) *wbxml.Document {
+	collection := wbxml.E(wbxml.PageAirSync, "Collection",
+		wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text(key)),
+		wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text(folderID)),
+	)
+	if key == "0" {
+		return &wbxml.Document{Root: wbxml.E(wbxml.PageAirSync, "Sync",
+			wbxml.E(wbxml.PageAirSync, "Collections", collection))}
+	}
+
 	options := wbxml.E(wbxml.PageAirSync, "Options",
 		wbxml.E(wbxml.PageAirSync, "FilterType", wbxml.Text(itoa(int(opts.DateFilter)))),
 	)
@@ -171,9 +175,7 @@ func buildSyncRequest(folderID, key string, opts EmailSyncOptions) *wbxml.Docume
 		options.Children = append(options.Children,
 			wbxml.E(wbxml.PageRightsManagement, "RightsManagementSupport", wbxml.Text("1")))
 	}
-	collection := wbxml.E(wbxml.PageAirSync, "Collection",
-		wbxml.E(wbxml.PageAirSync, "SyncKey", wbxml.Text(key)),
-		wbxml.E(wbxml.PageAirSync, "CollectionId", wbxml.Text(folderID)),
+	collection.Children = append(collection.Children,
 		wbxml.E(wbxml.PageAirSync, "DeletesAsMoves", wbxml.Text("1")),
 		wbxml.E(wbxml.PageAirSync, "GetChanges", wbxml.Text("1")),
 		wbxml.E(wbxml.PageAirSync, "WindowSize", wbxml.Text(itoa(opts.WindowSize))),
