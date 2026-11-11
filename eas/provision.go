@@ -78,11 +78,20 @@ func (c *httpClient) provisionPhase(ctx context.Context, key string, ack bool) (
 			wbxml.E(wbxml.PageProvision, "Status", wbxml.Text("1")),
 		)
 	}
-	doc := &wbxml.Document{
-		Root: wbxml.E(wbxml.PageProvision, "Provision",
-			wbxml.E(wbxml.PageProvision, "Policies", policy),
-		),
+	children := []wbxml.Node{}
+	if !ack && supportsProvisionDeviceInformation(c.cfg.ASVersion) {
+		children = append(children,
+			wbxml.E(wbxml.PageSettings, "DeviceInformation",
+				wbxml.E(wbxml.PageSettings, "Set",
+					wbxml.E(wbxml.PageSettings, "Model", wbxml.Text(c.cfg.DeviceType)),
+					wbxml.E(wbxml.PageSettings, "FriendlyName", wbxml.Text(c.cfg.DeviceType)),
+					wbxml.E(wbxml.PageSettings, "UserAgent", wbxml.Text(c.cfg.UserAgent)),
+				),
+			),
+		)
 	}
+	children = append(children, wbxml.E(wbxml.PageProvision, "Policies", policy))
+	doc := &wbxml.Document{Root: wbxml.E(wbxml.PageProvision, "Provision", children...)}
 
 	resp, err := c.post(ctx, "Provision", doc)
 	if err != nil {
@@ -122,6 +131,18 @@ func (c *httpClient) provisionPhase(ctx context.Context, key string, ack bool) (
 		}
 	}
 	return keyOut, typ, nil
+}
+
+// supportsProvisionDeviceInformation reports whether DeviceInformation is
+// carried by the initial Provision request. MS-ASPROV requires it for 14.1+
+// while 14.0 and earlier use the separate Settings command.
+func supportsProvisionDeviceInformation(version string) bool {
+	switch version {
+	case "14.1", "16.0", "16.1":
+		return true
+	default:
+		return false
+	}
 }
 
 // topStatus returns the integer value of the immediate <Status> child of
